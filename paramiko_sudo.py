@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import print_function
-import paramiko, os, json, sys, socket, select, threading, traceback, subprocess, time, getpass
+import paramiko, os, json, sys, socket, select, threading, traceback, subprocess, time, getpass, tempfile
 from optparse import OptionParser
 
 PTY_ENV = {'abc':'def','wow':123}
@@ -104,16 +104,11 @@ class __socat(threading.Thread):
   def run(self):
     cmd = 'socat -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:2250'.format(self.SOCAT_FILE)
     time.sleep(2.0)
-
-
     session = self.ssh.get_transport().open_session()
     session.set_combine_stderr(True)
     session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
     session.settimeout(EXEC_TIMEOUT)
- #   session.exec_command(generateSudoCommand(cmd))
     exec_tunnel(self.ssh, generateSudoCommand(cmd))
-
-#    exec_tunnel(self.ssh, cmd)
 
 
 class __localSocat(threading.Thread):
@@ -138,8 +133,39 @@ class __ls(threading.Thread):
     cmd = 'ls /'
     exec_tunnel(self.ssh, cmd)
 
+def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host):
+    session = ssh.get_transport().open_session()
+    session.set_combine_stderr(True)
+    session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
+    session.settimeout(EXEC_TIMEOUT)
+    session.exec_command(cmd)
+
+    stdin = session.makefile('wb', -1)
+    stdout = session.makefile('rb', -1)
+
+    stdin.write(options.password +'\n')
+    stdin.flush()
+
+    for line in stdout:
+        line = line.decode().strip()
+        print('host: %s: %s' % (host[0], line))
+
+    retcode = stdout.channel.recv_exit_status()
+    print('Sudo Execution finished with code {}'.format(retcode))
 
 
+
+class __sudoMoveScript(threading.Thread):
+  def __init__(self, ssh, SCRIPT,  options, host):
+    threading.Thread.__init__(self)
+    self.kill_received = False
+    self.ssh = ssh
+    self.options  = options
+    self.SCRIPT = SCRIPT
+    self.host = host
+  def run(self):
+    cmd = generateSudoCommand('mv -f ~{}/{} /root/.'.format(self.options.user, self.SCRIPT))
+    EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host)
 
 
 def generateEnvironmentString():
@@ -222,7 +248,15 @@ def parse_options():
         default=None,
         help="private key file to use for SSH authentication",
     )
-
+    parser.add_option(
+        "-E",
+        "--exec-script",
+        action="store",
+        type="string",
+        dest="exec_script",
+        default=None,
+        help="exec_script",
+    )
 
     options, args = parser.parse_args()
 
@@ -241,12 +275,32 @@ def parse_options():
     remote_host, remote_port = get_host_port(options.remote, SSH_PORT)
     return options, (host,port), (remote_host, remote_port)
 
+def uploadScript(ssh, REMOTE_EXEC_SCRIPT):
+    REMOTE_EXEC_SCRIPT_CONTENTS = json.dumps({'abc':123})
+    REMOTE_EXEC_SCRIPT_MODE = 0o700
+    with open(REMOTE_EXEC_SCRIPT,'w') as f:
+        f.write(REMOTE_EXEC_SCRIPT)
+    with open(REMOTE_EXEC_SCRIPT,'r') as f:
+        REMOTE_EXEC_SCRIPT_BYTES = len(f.read())
+    sftp = paramiko.SFTPClient.from_transport(ssh.get_transport())
+    sftp.put(REMOTE_EXEC_SCRIPT, REMOTE_EXEC_SCRIPT)
+    sftp.chmod(REMOTE_EXEC_SCRIPT, REMOTE_EXEC_SCRIPT_MODE)
+    sftp.close()
+    if os.path.exists(REMOTE_EXEC_SCRIPT):
+      os.remove(REMOTE_EXEC_SCRIPT)
+    print('uploaded {} bytes to remote file {}'.format(REMOTE_EXEC_SCRIPT_BYTES, REMOTE_EXEC_SCRIPT, ))
+
+def sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host):
+    ls = __sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host)
+    ls.daemon = False
+    ls.start()
+    print('__sudoMoveScript finished')
+
 
 def main():
     options, host, remote = parse_options()
-
-
-
+    tf = tempfile.NamedTemporaryFile(delete=False)
+    REMOTE_EXEC_SCRIPT = "{}".format(os.path.basename(tf.name))
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.load_system_host_keys()
@@ -258,6 +312,13 @@ def main():
         key_filename=options.keyfile,
         look_for_keys=True,
     )    
+
+    uploadScript(ssh, REMOTE_EXEC_SCRIPT)
+
+
+    sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host)
+
+
 
     ls = __ls(ssh)
     ls.daemon = False
