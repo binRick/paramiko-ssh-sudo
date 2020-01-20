@@ -3,46 +3,51 @@ from __future__ import print_function
 import paramiko, os, json, sys, socket, select, threading, traceback, subprocess, time, getpass, tempfile
 from optparse import OptionParser
 
-PTY_ENV = {'abc':'def','wow':123}
 
-REMOTE_FORWARDED_PORT = 49225
-FORWARDED_PORT_DEST = 49552
+DEBUG_MODE = True
+
+LOCAL_LISTEN_PORT = 49225
+REMOTE_LISTEN_PORT = 2251
+
+SUDO_ARGS='-k -H -u root'
+
+SHELL  = 'sh'
+SHELL_ARGS = ""
+
 PTY_TERM = 'xterm'
 PTY_WIDTH = 160
 PTY_HEIGHT = 24
 PTY_WIDTH_PIXELS = 0
 PTY_HEIGHT_PIXELS = 0    
-EXEC_TIMEOUT = 10
+PTY_ENV = {'abc':'def','wow':123}
+
+SOCAT_PATH = '/usr/bin/socat'
+SOCAT_TIMEOUT = 1800
+
 TUNNELS = {}
 
-EXEC_TIMEOUT = 10
+REMOTE_FORWARDED_FILE = '/var/log/messages'
+LOCAL_FILE_FORWARDED_PATH = '/tmp/wow1'
+LOCAL_FORWARDED_OUTPUT = 'CREATE:{},perm=0600'.format(LOCAL_FILE_FORWARDED_PATH)
+
+SSH_EXEC_TIMEOUT = 10
+DEFAULT_SSH_PORT = 22
+
 DSTAT = 'dstat -alp --top-cpu --top-cputime-avg 1'
-SSH_PORT = 22
-HELP = """\
-Paramiko SSH Test
-"""
 
-FORWARDED_PORT_DEST = 2250
-COMMANDS = ['id','ls /','find /']
-COMMANDS = ['id','ls /','tail -f /var/log/messages']
-COMMANDS = ['id','ls /','journalctl -f']
-COMMANDS = ['id','ls /','env']
-COMMANDS = ['id','ls /']
-COMMANDS = ['id','ls /',DSTAT]
-
-SH_ARGS = ""
-_COMMAND = ' && '.join(COMMANDS)
-SUDO_ARGS='-k -H -u root'
-g_verbose = True
+HELP = """Paramiko Sudo Forwarded SSH Connection"""
 
 def generateSudoCommand(COMMAND):
-    return "command sudo {} {} sh -{}c \"{}\"".format(SUDO_ARGS, generateEnvironmentString(), SH_ARGS, COMMAND)
+    return "command sudo {} {} {} -{}c \"{}\"".format(SUDO_ARGS, generateEnvironmentString(), SHELL, SHELL_ARGS, COMMAND)
 
 def exec_tunnel(ssh,cmd):
     print('et.........')
     stdin, stdout, stderr = ssh.exec_command(cmd);
+    stdout_lines = []
     for line in stdout:
         print('[{}] => '.format(cmd) + line.strip('\n'))
+        stdout_lines.append(line)
+    return stdout_lines
 
 def handler(chan, host, port):
     sock = socket.socket()
@@ -51,11 +56,7 @@ def handler(chan, host, port):
     except Exception as e:
         verbose("Forwarding request to %s:%d failed: %r" % (host, port, e))
         return
-
-    verbose(
-        "Connected!  Tunnel open %r -> %r -> %r"
-        % (chan.origin_addr, chan.getpeername(), (host, port))
-    )
+    verbose("Connected!  Tunnel open %r -> %r -> %r"% (chan.origin_addr, chan.getpeername(), (host, port)))
     while True:
         r, w, x = select.select([sock, chan], [], [])
         if sock in r:
@@ -96,33 +97,39 @@ class reverse_forward_tunnel(threading.Thread):
 
 
 class __socat(threading.Thread):
-  def __init__(self, ssh, SOCAT_FILE):
+  def __init__(self, ssh, REMOTE_FORWARDED_FILE, host, options):
     threading.Thread.__init__(self)
     self.kill_received = False
     self.ssh = ssh
-    self.SOCAT_FILE = SOCAT_FILE
+    self.options = options
+    self.host = host
+    self.REMOTE_FORWARDED_FILE = REMOTE_FORWARDED_FILE
   def run(self):
-    cmd = 'socat -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:2250'.format(self.SOCAT_FILE)
-    time.sleep(2.0)
-    session = self.ssh.get_transport().open_session()
-    session.set_combine_stderr(True)
-    session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
-    session.settimeout(EXEC_TIMEOUT)
-    exec_tunnel(self.ssh, generateSudoCommand(cmd))
-
+    cmd = '{} -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:{}'.format(SOCAT_PATH,self.REMOTE_FORWARDED_FILE,REMOTE_LISTEN_PORT)
+    cmd = generateSudoCommand(cmd)
+    while True:
+        session = self.ssh.get_transport().open_session()
+        session.set_combine_stderr(True)
+        session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
+        session.settimeout(SOCAT_TIMEOUT)
+        print('socat execing.,')
+        L = EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host)
+        print('socat exited {}'.format(L))
+        time.sleep(0.01)
 
 class __localSocat(threading.Thread):
   def __init__(self):
     threading.Thread.__init__(self)
     self.kill_received = False
   def run(self):
-    cmd = 'socat -u TCP4-LISTEN:49225,reuseaddr CREATE:/tmp/6c1bf75e-0733-4738-b552-a1118e12c61e/audit.json,perm=0640'
+    cmd = '{} -u TCP4-LISTEN:{},reuseaddr {}'.format(SOCAT_PATH,LOCAL_LISTEN_PORT, LOCAL_FORWARDED_OUTPUT)
     cwd = '/'
     env = os.environ.copy()
-    time.sleep(2.0)
-    proc = subprocess.Popen(cmd.split(' '),stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env, shell=False)
-    stdout, stderr = proc.communicate()
-    exit_code = proc.wait()
+    while True:
+        proc = subprocess.Popen(cmd.split(' '),stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env, shell=False)
+        stdout, stderr = proc.communicate()
+        exit_code = proc.wait()
+        time.sleep(0.01)
 
 class __ls(threading.Thread):
   def __init__(self, ssh):
@@ -137,7 +144,7 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host):
     session = ssh.get_transport().open_session()
     session.set_combine_stderr(True)
     session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
-    session.settimeout(EXEC_TIMEOUT)
+    session.settimeout(SSH_EXEC_TIMEOUT)
     session.exec_command(cmd)
 
     stdin = session.makefile('wb', -1)
@@ -145,26 +152,30 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host):
 
     stdin.write(options.password +'\n')
     stdin.flush()
+    try:
+        for line in stdout:
+            line = line.decode().strip()
+            print('host: %s: %s' % (host[0], line))
 
-    for line in stdout:
-        line = line.decode().strip()
-        print('host: %s: %s' % (host[0], line))
+        retcode = stdout.channel.recv_exit_status()
+        print('Sudo Execution finished with code {}'.format(retcode))
+    except Exception as e:
+        print('Sudo Execution failed')
+        verbose(e)
+        pass
 
-    retcode = stdout.channel.recv_exit_status()
-    print('Sudo Execution finished with code {}'.format(retcode))
 
-
-
-class __sudoMoveScript(threading.Thread):
-  def __init__(self, ssh, SCRIPT,  options, host):
+class __sudoCommand(threading.Thread):
+  def __init__(self, COMMAND, ssh, options, host):
     threading.Thread.__init__(self)
     self.kill_received = False
     self.ssh = ssh
     self.options  = options
-    self.SCRIPT = SCRIPT
     self.host = host
+    self.COMMAND = COMMAND
   def run(self):
-    cmd = generateSudoCommand('mv -f ~{}/{} /root/.'.format(self.options.user, self.SCRIPT))
+    cmd = generateSudoCommand(self.COMMAND)
+
     EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host)
 
 
@@ -176,7 +187,7 @@ def generateEnvironmentString():
 
 
 def verbose(s):
-    if g_verbose:
+    if DEBUG_MODE:
         print(s)
 
 def get_host_port(spec, default_port):
@@ -185,7 +196,7 @@ def get_host_port(spec, default_port):
     return args[0], args[1]
 
 def parse_options():
-    global g_verbose
+    global DEBUG_MODE
 
     parser = OptionParser(
         usage="usage: %prog [options] <ssh-server>[:<server-port>]",
@@ -270,9 +281,9 @@ def parse_options():
     if options.host is None:
         parser.error("Host address required (-r).")
 
-    g_verbose = options.verbose
-    host, port = get_host_port(options.host, SSH_PORT)
-    remote_host, remote_port = get_host_port(options.remote, SSH_PORT)
+    DEBUG_MODE = options.verbose
+    host, port = get_host_port(options.host, DEFAULT_SSH_PORT)
+    remote_host, remote_port = get_host_port(options.remote, DEFAULT_SSH_PORT)
     return options, (host,port), (remote_host, remote_port)
 
 def uploadScript(ssh, REMOTE_EXEC_SCRIPT):
@@ -291,10 +302,25 @@ def uploadScript(ssh, REMOTE_EXEC_SCRIPT):
     print('uploaded {} bytes to remote file {}'.format(REMOTE_EXEC_SCRIPT_BYTES, REMOTE_EXEC_SCRIPT, ))
 
 def sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host):
-    ls = __sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host)
-    ls.daemon = False
-    ls.start()
-    print('__sudoMoveScript finished')
+    CMD = 'mv -f ~{}/{} /root/.'.format(options.user, REMOTE_EXEC_SCRIPT)
+    mv = __sudoCommand(CMD, ssh, options, host)
+    mv.daemon = False
+    mv.start()
+    print('__sudo mv finished')
+
+def sudoChmodScript(ssh, REMOTE_EXEC_SCRIPT, MODE, options, host):
+    CMD = 'chmod {} /root/{}'.format(MODE, REMOTE_EXEC_SCRIPT)
+    mv = __sudoCommand(CMD, ssh, options, host)
+    mv.daemon = False
+    mv.start()
+    print('__sudo chmod finished')
+
+def sudoChownScript(ssh, REMOTE_EXEC_SCRIPT, MODE, options, host):
+    CMD = 'chown {} /root/{}'.format(MODE, REMOTE_EXEC_SCRIPT)
+    mv = __sudoCommand(CMD, ssh, options, host)
+    mv.daemon = False
+    mv.start()
+    print('__sudo chown finished')
 
 
 def main():
@@ -313,57 +339,45 @@ def main():
         look_for_keys=True,
     )    
 
+    """   Upload Script to non root user home dir   """
     uploadScript(ssh, REMOTE_EXEC_SCRIPT)
 
-
+    time.sleep(0.1)
+    """   Move to root dir   """
     sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host)
 
+    time.sleep(0.1)
+    """   Chmod root Script   """
+    sudoChmodScript(ssh, REMOTE_EXEC_SCRIPT, '0700', options, host)
+
+    time.sleep(0.1)
+    """   Chown root Script   """
+    sudoChownScript(ssh, REMOTE_EXEC_SCRIPT, 'root:root', options, host)
 
 
-    ls = __ls(ssh)
-    ls.daemon = False
-    ls.start()
-
+    """   Local Socat Listener Local Socket  > File  """
     localSocat = __localSocat()
     localSocat.daemon = True
     localSocat.start()
 
 
-    SOCAT_FILE = '/tmp/a'
-    agent = __socat(ssh, SOCAT_FILE)
+    """   Setup TCP Tunnel   """
+    TUNNELS['tunnel1'] = reverse_forward_tunnel(remote[0], remote[1], host[0], REMOTE_LISTEN_PORT, ssh.get_transport())
+    TUNNELS['tunnel1'].daemon = True
+    TUNNELS['tunnel1'].start()
+    print(">> [tunnel1 Tunnel] Started")
+
+
+    """   Remote Socat Listener Local File  > Socket """
+    agent = __socat(ssh, REMOTE_FORWARDED_FILE, host, options)
     agent.daemon = True
     agent.start()
+    print('remote socat launched...........')
 
 
-    TUNNELS['json_audit'] = reverse_forward_tunnel(remote[0], remote[1], host[0], FORWARDED_PORT_DEST, ssh.get_transport())
-    TUNNELS['json_audit'].daemon = True
-    TUNNELS['json_audit'].start()
-    print(">> [json_audit Tunnel] Started")
-
-    #reverse_forward_tunnel(REMOTE_FORWARDED_PORT, remote[0], FORWARDED_PORT_DEST, ssh.get_transport())
-
-
-
-    session = ssh.get_transport().open_session()
-    session.set_combine_stderr(True)
-    session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
-    session.settimeout(EXEC_TIMEOUT)
-    session.exec_command(generateSudoCommand(DSTAT))
-
-    stdin = session.makefile('wb', -1)
-    stdout = session.makefile('rb', -1)
-
-    stdin.write(options.password +'\n')
-    stdin.flush()
-
-    for line in stdout:
-        line = line.decode().strip()
-        print('host: %s: %s' % (host[0], line))
-
-    retcode = stdout.channel.recv_exit_status()
-    print('Execution finished with code {}'.format(retcode))
-
-
+    while True:
+        print('Checking if execution is complete.....')
+        time.sleep(5)
 
 
 if __name__ == "__main__":
