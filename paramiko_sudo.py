@@ -66,6 +66,17 @@ def parse_options():
         metavar="host:port",
         help="remote host and port to forward to",
     )
+    parser.add_option(
+        "-K",
+        "--key",
+        action="store",
+        type="string",
+        dest="keyfile",
+        default=None,
+        help="private key file to use for SSH authentication",
+    )
+
+
     options, args = parser.parse_args()
 
     print('args {}'.format(args))
@@ -84,9 +95,17 @@ def parse_options():
 def main():
     options, remote = parse_options()
 
+
+
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(remote[0], username=options.user, password=options.password)    
+    ssh.load_system_host_keys()
+
+    ssh.connect(
+        remote[0], remote[1],
+        username=options.user, 
+        password=options.password,
+    )    
 
     transport = ssh.get_transport()
 
