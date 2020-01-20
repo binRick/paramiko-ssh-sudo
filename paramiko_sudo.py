@@ -1,21 +1,43 @@
 #!/usr/bin/env python3
+from __future__ import print_function
 import paramiko, os, json, sys, socket, select, threading, traceback, subprocess, time, getpass
 from optparse import OptionParser
 
+PTY_ENV = {'abc':'def','wow':123}
 
+PTY_TERM = 'xterm-256'
+PTY_WIDTH = 160
+PTY_HEIGHT = 24
+PTY_WIDTH_PIXELS = 0
+PTY_HEIGHT_PIXELS = 0    
+
+EXEC_TIMEOUT = 10
+DSTAT = 'dstat -alp --top-cpu --top-cputime-avg 5 1500'
 SSH_PORT = 22
 HELP = """\
 Paramiko SSH Test
 """
 
 COMMANDS = ['id','ls /','find /']
+COMMANDS = ['id','ls /','tail -f /var/log/messages']
+COMMANDS = ['id','ls /','journalctl -f']
 COMMANDS = ['id','ls /a']
+COMMANDS = ['id','ls /','env']
+COMMANDS = ['id','ls /',DSTAT]
 
-
+SH_ARGS = "i"
 COMMAND = ' && '.join(COMMANDS)
 SUDO_ARGS='-k -H -u root'
-SUDO_CMD = "command sudo {} sh -c \"{}\"".format(SUDO_ARGS, COMMAND)
 g_verbose = True
+
+def generateEnvironmentString():
+    PTY_ENV_STR = ''
+    for k in PTY_ENV.keys():
+        PTY_ENV_STR += ' {}={}'.format(k,PTY_ENV[k])
+    return PTY_ENV_STR
+
+def generateSudoCommand():
+    return "command sudo {} {} sh -{}c \"{}\"".format(SUDO_ARGS, generateEnvironmentString(), SH_ARGS, COMMAND)
 
 def verbose(s):
     if g_verbose:
@@ -117,8 +139,9 @@ def main():
     transport = ssh.get_transport()
     session = transport.open_session()
     session.set_combine_stderr(True)
-    session.get_pty()
-    session.exec_command(SUDO_CMD)
+    session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
+    session.settimeout(10)
+    session.exec_command(generateSudoCommand())
 
     stdin = session.makefile('wb', -1)
     stdout = session.makefile('rb', -1)
@@ -129,7 +152,10 @@ def main():
     for line in stdout:
         line = line.decode().strip()
         print('host: %s: %s' % (remote[0], line))
-    print('Finished!')
+
+    retcode = stdout.channel.recv_exit_status()
+    print('Execution finished with code {}'.format(retcode))
+
 
 
 
