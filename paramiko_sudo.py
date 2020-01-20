@@ -7,7 +7,12 @@ SSH_PORT = 22
 HELP = """\
 Paramiko SSH Test
 """
-COMMAND = 'id && ls /'
+
+COMMANDS = ['id','ls /','find /']
+COMMANDS = ['id','ls /a']
+
+
+COMMAND = ' && '.join(COMMANDS)
 SUDO_ARGS='-k -H -u root'
 SUDO_CMD = "command sudo {} sh -c \"{}\"".format(SUDO_ARGS, COMMAND)
 g_verbose = True
@@ -105,10 +110,11 @@ def main():
         remote[0], remote[1],
         username=options.user, 
         password=options.password,
+        key_filename=options.keyfile,
+        look_for_keys=True,
     )    
 
     transport = ssh.get_transport()
-
     session = transport.open_session()
     session.set_combine_stderr(True)
     session.get_pty()
@@ -120,10 +126,10 @@ def main():
     stdin.write(options.password +'\n')
     stdin.flush()
 
-    for line in stdout.read().splitlines():        
+    for line in stdout:
         line = line.decode().strip()
         print('host: %s: %s' % (remote[0], line))
-
+    print('Finished!')
 
 
 
