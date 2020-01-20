@@ -5,7 +5,7 @@ from optparse import OptionParser
 
 PTY_ENV = {'abc':'def','wow':123}
 
-REMOTE_FORWARDED_PORT = 2233
+REMOTE_FORWARDED_PORT = 1235
 FORWARDED_PORT_DEST = 49552
 PTY_TERM = 'xterm'
 PTY_WIDTH = 160
@@ -22,6 +22,7 @@ HELP = """\
 Paramiko SSH Test
 """
 
+FORWARDED_PORT_DEST = 2250
 COMMANDS = ['id','ls /','find /']
 COMMANDS = ['id','ls /','tail -f /var/log/messages']
 COMMANDS = ['id','ls /','journalctl -f']
@@ -29,8 +30,8 @@ COMMANDS = ['id','ls /','env']
 COMMANDS = ['id','ls /']
 COMMANDS = ['id','ls /',DSTAT]
 
-SH_ARGS = "i"
-#COMMAND = ' && '.join(COMMANDS)
+SH_ARGS = ""
+_COMMAND = ' && '.join(COMMANDS)
 SUDO_ARGS='-k -H -u root'
 g_verbose = True
 
@@ -73,15 +74,16 @@ def handler(chan, host, port):
 
 
 class reverse_forward_tunnel(threading.Thread):
-  def __init__(self,server_port, remote_host, remote_port, transport):
+  def __init__(self,remote_host,remote_port, host, port, transport):
     threading.Thread.__init__(self)
     self.kill_received = False
-    self.server_port = server_port
     self.remote_host = remote_host
     self.remote_port = remote_port
+    self.host = host
+    self.port = port
     self.transport = transport
   def run(self):
-    self.transport.request_port_forward("", self.server_port)
+    self.transport.request_port_forward("",self.port)
     while True:
         chan = self.transport.accept(1000)
         if chan is None:
@@ -100,7 +102,7 @@ class __socat(threading.Thread):
     self.ssh = ssh
     self.SOCAT_FILE = SOCAT_FILE
   def run(self):
-    cmd = 'socat -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:2233'.format(self.SOCAT_FILE)
+    cmd = 'socat -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:1235'.format(self.SOCAT_FILE)
     time.sleep(2.0)
 
 
@@ -192,6 +194,16 @@ def parse_options():
         % getpass.getuser(),
     )
     parser.add_option(
+        "-H",
+        "--host",
+        action="store",
+        type="string",
+        dest="host",
+        default=None,
+        metavar="host:port",
+        help="host and port to forward from",
+    )
+    parser.add_option(
         "-r",
         "--remote",
         action="store",
@@ -221,14 +233,17 @@ def parse_options():
         parser.error("Incorrect number of arguments.")
     if options.remote is None:
         parser.error("Remote address required (-r).")
+    if options.host is None:
+        parser.error("Host address required (-r).")
 
     g_verbose = options.verbose
+    host, port = get_host_port(options.host, SSH_PORT)
     remote_host, remote_port = get_host_port(options.remote, SSH_PORT)
-    return options, (remote_host, remote_port)
+    return options, (host,port), (remote_host, remote_port)
 
 
 def main():
-    options, remote = parse_options()
+    options, host, remote = parse_options()
 
 
 
@@ -237,7 +252,7 @@ def main():
     ssh.load_system_host_keys()
 
     ssh.connect(
-        remote[0], remote[1],
+        host[0], host[1],
         username=options.user, 
         password=options.password,
         key_filename=options.keyfile,
@@ -259,7 +274,7 @@ def main():
     agent.start()
 
 
-    TUNNELS['json_audit'] = reverse_forward_tunnel(REMOTE_FORWARDED_PORT, remote[0], FORWARDED_PORT_DEST, ssh.get_transport())
+    TUNNELS['json_audit'] = reverse_forward_tunnel(remote[0], remote[1], host[0], FORWARDED_PORT_DEST, ssh.get_transport())
     TUNNELS['json_audit'].daemon = True
     TUNNELS['json_audit'].start()
     print(">> [json_audit Tunnel] Started")
@@ -282,7 +297,7 @@ def main():
 
     for line in stdout:
         line = line.decode().strip()
-        print('host: %s: %s' % (remote[0], line))
+        print('host: %s: %s' % (host[0], line))
 
     retcode = stdout.channel.recv_exit_status()
     print('Execution finished with code {}'.format(retcode))
