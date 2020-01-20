@@ -5,7 +5,7 @@ from optparse import OptionParser
 
 PTY_ENV = {'abc':'def','wow':123}
 
-REMOTE_FORWARDED_PORT = 1235
+REMOTE_FORWARDED_PORT = 49225
 FORWARDED_PORT_DEST = 49552
 PTY_TERM = 'xterm'
 PTY_WIDTH = 160
@@ -102,7 +102,7 @@ class __socat(threading.Thread):
     self.ssh = ssh
     self.SOCAT_FILE = SOCAT_FILE
   def run(self):
-    cmd = 'socat -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:1235'.format(self.SOCAT_FILE)
+    cmd = 'socat -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:2250'.format(self.SOCAT_FILE)
     time.sleep(2.0)
 
 
@@ -268,7 +268,7 @@ def main():
     localSocat.start()
 
 
-    SOCAT_FILE = '/var/log/messages'
+    SOCAT_FILE = '/tmp/a'
     agent = __socat(ssh, SOCAT_FILE)
     agent.daemon = True
     agent.start()

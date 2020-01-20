@@ -4,7 +4,7 @@ cd $( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
 __PASS=Q8DHmYMqXAksdf8yhU
 __HOST=vpn299:22
-__REMOTE=127.0.0.1:1235
+__REMOTE=127.0.0.1:49225
 
 EXPORTS="_HOST=$__HOST _REMOTE=$__REMOTE _HOST=$__HOST USER=bduser1 _PASS=$__PASS _KEY=$(pwd)/../../PARAMIKO_TEST_KEY.pub"
 export $EXPORTS
