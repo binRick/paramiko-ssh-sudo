@@ -112,9 +112,7 @@ class __socat(threading.Thread):
         session.set_combine_stderr(True)
         session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
         session.settimeout(SOCAT_TIMEOUT)
-        print('socat execing.,')
         L = EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host)
-        print('socat exited {}'.format(L))
         time.sleep(0.01)
 
 class __localSocat(threading.Thread):
