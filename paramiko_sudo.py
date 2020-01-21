@@ -1,41 +1,32 @@
 #!/usr/bin/env python3
 from __future__ import print_function
-import paramiko, os, json, sys, socket, select, threading, traceback, subprocess, time, getpass, tempfile
+import paramiko, os, json, sys, socket, select, threading, traceback, subprocess, time, getpass, tempfile, pathlib
 from optparse import OptionParser
 
-
-DEBUG_MODE = True
-
+DEBUG_MODE = False
 LOCAL_LISTEN_PORT = 49225
 REMOTE_LISTEN_PORT = 2251
-
 SUDO_ARGS='-k -H -u root'
-
 SHELL  = 'sh'
 SHELL_ARGS = ""
-
 PTY_TERM = 'xterm'
 PTY_WIDTH = 160
 PTY_HEIGHT = 24
 PTY_WIDTH_PIXELS = 0
 PTY_HEIGHT_PIXELS = 0    
 PTY_ENV = {'abc':'def','wow':123}
-
 SOCAT_PATH = '/usr/bin/socat'
 SOCAT_TIMEOUT = 1800
-
 TUNNELS = {}
-
-REMOTE_FORWARDED_FILE = '/var/log/messages'
-LOCAL_FILE_FORWARDED_PATH = '/tmp/wow1'
-LOCAL_FORWARDED_OUTPUT = 'CREATE:{},perm=0600'.format(LOCAL_FILE_FORWARDED_PATH)
-
 SSH_EXEC_TIMEOUT = 10
 DEFAULT_SSH_PORT = 22
-
 DSTAT = 'dstat -alp --top-cpu --top-cputime-avg 1'
-
 HELP = """Paramiko Sudo Forwarded SSH Connection"""
+
+
+def verbose(s):
+    if DEBUG_MODE:
+        print(s)
 
 def sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host):
     CMD = '/root/{}'.format(REMOTE_EXEC_SCRIPT)
@@ -48,6 +39,8 @@ def sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host
         if ExecuteLocal.exit_code:
             DURATION_MS = int(time.time()-START_MS)
             print('       [Playbook Execution Monitor]      Exited {} after {}ms'.format(ExecuteLocal.exit_code,DURATION_MS))
+            print('       [Playbook Execution Monitor]        Removing Remote Files....')
+            print('       [Playbook Execution Monitor]        Checking Local Files....')
             if ExecuteLocal.exit_code != 0:
                 print('       [Playbook Execution Monitor]      FAILED!')
                 sys.exit(ExecuteLocal.exit_code)
@@ -61,11 +54,10 @@ def generateSudoCommand(COMMAND):
     return "command sudo {} {} {} -{}c \"{}\"".format(SUDO_ARGS, generateEnvironmentString(), SHELL, SHELL_ARGS, COMMAND)
 
 def exec_tunnel(ssh,cmd):
-    print('et.........')
     stdin, stdout, stderr = ssh.exec_command(cmd);
     stdout_lines = []
     for line in stdout:
-        print('[{}] => '.format(cmd) + line.strip('\n'))
+        #print('[{}] => '.format(cmd) + line.strip('\n'))
         stdout_lines.append(line)
     return stdout_lines
 
@@ -117,15 +109,16 @@ class reverse_forward_tunnel(threading.Thread):
 
 
 class __socat(threading.Thread):
-  def __init__(self, ssh, REMOTE_FORWARDED_FILE, host, options):
+  def __init__(self, ssh, REMOTE_FORWARDED_FILE, host, options, REMOTE_LISTEN_PORT):
     threading.Thread.__init__(self)
     self.kill_received = False
     self.ssh = ssh
     self.options = options
     self.host = host
+    self.REMOTE_LISTEN_PORT = REMOTE_LISTEN_PORT
     self.REMOTE_FORWARDED_FILE = REMOTE_FORWARDED_FILE
   def run(self):
-    cmd = '{} -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:{}'.format(SOCAT_PATH,self.REMOTE_FORWARDED_FILE,REMOTE_LISTEN_PORT)
+    cmd = '{} -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:{}'.format(SOCAT_PATH,self.REMOTE_FORWARDED_FILE,self.REMOTE_LISTEN_PORT)
     cmd = generateSudoCommand(cmd)
     while True:
         session = self.ssh.get_transport().open_session()
@@ -136,14 +129,21 @@ class __socat(threading.Thread):
         time.sleep(0.01)
 
 class __localSocat(threading.Thread):
-  def __init__(self):
+  def __init__(self, LOCAL_LISTEN_PORT, LOCAL_FORWARDED_FILE):
     threading.Thread.__init__(self)
     self.kill_received = False
+    self.LOCAL_LISTEN_PORT = LOCAL_LISTEN_PORT
+    self.LOCAL_FORWARDED_FILE = LOCAL_FORWARDED_FILE
+    self.LOCAL_FORWARDED_OUTPUT = 'CREATE:{},perm=0600'.format(self.LOCAL_FORWARDED_FILE)
+    self.basedir = os.path.dirname(self.LOCAL_FORWARDED_FILE)
+    pathlib.Path(self.basedir).mkdir(parents=True, exist_ok=True)
+    print('__localSocat ok {}'.format(self.basedir))
   def run(self):
-    cmd = '{} -u TCP4-LISTEN:{},reuseaddr {}'.format(SOCAT_PATH,LOCAL_LISTEN_PORT, LOCAL_FORWARDED_OUTPUT)
+    cmd = '{} -u TCP4-LISTEN:{},reuseaddr {}'.format(SOCAT_PATH,self.LOCAL_LISTEN_PORT, self.LOCAL_FORWARDED_OUTPUT)
     cwd = '/'
     env = os.environ.copy()
     while True:
+        #print('local socat cmd=\n{}\n'.format(cmd))
         proc = subprocess.Popen(cmd.split(' '),stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env, shell=False)
         stdout, stderr = proc.communicate()
         exit_code = proc.wait()
@@ -174,13 +174,13 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host, lines=[]):
         for line in stdout:
             line = line.decode().strip()
             lines.append(line)
-            print('host: %s: %s' % (host[0], line))
+            #print('host: %s: %s' % (host[0], line))
 
         retcode = stdout.channel.recv_exit_status()
-        print('Sudo Execution finished with code {}'.format(retcode))
+        #print('Sudo Execution finished with code {}'.format(retcode))
         return retcode
     except Exception as e:
-        print('Sudo Execution failed')
+        #print('Sudo Execution failed')
         verbose(e)
         return None, None
 
@@ -207,9 +207,6 @@ def generateEnvironmentString():
     return PTY_ENV_STR
 
 
-def verbose(s):
-    if DEBUG_MODE:
-        print(s)
 
 def get_host_port(spec, default_port):
     args = (spec.split(":", 1) + [default_port])[:2]
@@ -281,6 +278,15 @@ def parse_options():
         help="private key file to use for SSH authentication",
     )
     parser.add_option(
+        "-L",
+        "--log-files",
+        action="store",
+        type="string",
+        dest="log_files",
+        default=None,
+        help="log_files",
+    )
+    parser.add_option(
         "-E",
         "--exec-script",
         action="store",
@@ -292,17 +298,22 @@ def parse_options():
 
     options, args = parser.parse_args()
 
-    print('args {}'.format(args))
-    print('options {}'.format(options))
+    verbose('args {}'.format(args))
+    verbose('options {}'.format(options))
 
     if len(args) != 0:
         parser.error("Incorrect number of arguments.")
     if options.remote is None:
         parser.error("Remote address required (-r).")
+    if options.log_files is None:
+        parser.error("Log Files (F).")
     if options.exec_script is None or not os.path.exists(options.exec_script):
         parser.error("Exec Script (-E).")
     if options.host is None:
         parser.error("Host address required (-h).")
+
+    options.log_files = options.log_files.split(',')
+    verbose('options.log_files={}'.format(options.log_files))
 
     DEBUG_MODE = options.verbose
     host, port = get_host_port(options.host, DEFAULT_SSH_PORT)
@@ -324,29 +335,35 @@ def uploadScript(ssh, REMOTE_EXEC_SCRIPT,options):
     sftp.close()
     if os.path.exists(REMOTE_EXEC_SCRIPT):
       os.remove(REMOTE_EXEC_SCRIPT)
-    print('uploaded {} bytes to remote file {}'.format(REMOTE_EXEC_SCRIPT_BYTES, REMOTE_EXEC_SCRIPT, ))
+    verbose('uploaded {} bytes to remote file {}'.format(REMOTE_EXEC_SCRIPT_BYTES, REMOTE_EXEC_SCRIPT, ))
 
+def sudoLogPathMkdir(ssh, REMOTE_FORWARDED_FILE, options, host):
+    CMD = 'command mkdir -p {}'.format(os.path.dirname(REMOTE_FORWARDED_FILE))
+    mv = __sudoCommand(CMD, ssh, options, host)
+    mv.daemon = False
+    mv.start()
+    verbose('__sudo mkdir log path finished: {}'.format(CMD))
 
 def sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host):
     CMD = 'mv -f ~{}/{} /root/.'.format(options.user, REMOTE_EXEC_SCRIPT)
     mv = __sudoCommand(CMD, ssh, options, host)
     mv.daemon = False
     mv.start()
-    print('__sudo mv finished')
+    verbose('__sudo mv finished')
 
 def sudoChmodScript(ssh, REMOTE_EXEC_SCRIPT, MODE, options, host):
     CMD = 'chmod {} /root/{}'.format(MODE, REMOTE_EXEC_SCRIPT)
     mv = __sudoCommand(CMD, ssh, options, host)
     mv.daemon = False
     mv.start()
-    print('__sudo chmod finished')
+    verbose('__sudo chmod finished')
 
 def sudoChownScript(ssh, REMOTE_EXEC_SCRIPT, MODE, options, host):
     CMD = 'chown {} /root/{}'.format(MODE, REMOTE_EXEC_SCRIPT)
     mv = __sudoCommand(CMD, ssh, options, host)
     mv.daemon = False
     mv.start()
-    print('__sudo chown finished')
+    verbose('__sudo chown finished')
 
 
 def main():
@@ -382,22 +399,34 @@ def main():
 
 
     """   Local Socat Listener Local Socket  > File  """
-    localSocat = __localSocat()
-    localSocat.daemon = True
-    localSocat.start()
+    for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
+        localSocat = __localSocat(LOCAL_LISTEN_PORT+i, REMOTE_FORWARDED_FILE)
+        localSocat.daemon = True
+        localSocat.start()
+        time.sleep(0.1)
 
     """   Setup TCP Forwards From Remote to local host """
-    TUNNELS['tunnel1'] = reverse_forward_tunnel(remote[0], remote[1], host[0], REMOTE_LISTEN_PORT, ssh.get_transport())
-    TUNNELS['tunnel1'].daemon = True
-    TUNNELS['tunnel1'].start()
-    print(">> [tunnel1 Tunnel] Started")
+    for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
+        REMOTE_PORT = remote[1] + i
+        TUNNELS[i] = reverse_forward_tunnel(remote[0], REMOTE_PORT, host[0], REMOTE_LISTEN_PORT + i, ssh.get_transport())
+        TUNNELS[i].daemon = True
+        TUNNELS[i].start()
+        verbose(">> [tunnel #{} ] Started (remote file {} => remote port {})".format(i,REMOTE_FORWARDED_FILE, REMOTE_PORT))
+        time.sleep(0.1)
 
+    """   Create Directories to hold remote logs   """
+    for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
+        sudoLogPathMkdir(ssh, REMOTE_FORWARDED_FILE, options, host)
 
     """   Remote Socat Listener Local File  > Socket """
-    agent = __socat(ssh, REMOTE_FORWARDED_FILE, host, options)
-    agent.daemon = True
-    agent.start()
-    print('remote socat launched...........')
+    for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
+        verbose("""   Remote Socat Listener Local File  > Socket #{} {}""".format(i,REMOTE_FORWARDED_FILE))
+        agent = __socat(ssh, REMOTE_FORWARDED_FILE, host, options, REMOTE_LISTEN_PORT + i)
+        agent.daemon = True
+        agent.start()
+        verbose('remote socat launched...........')
+        time.sleep(0.1)
+
 
     """   Execute Playbook via sudo in local connection mode  """
     sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host)
