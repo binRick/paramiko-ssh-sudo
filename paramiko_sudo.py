@@ -4,6 +4,7 @@ import paramiko, os, json, sys, socket, select, threading, traceback, subprocess
 from optparse import OptionParser
 from colorclass import Color
 
+_DEBUG_SUDO = False
 DEBUG_MODE = False
 SUDO_ARGS='-k -E -H -u root'
 SHELL  = 'sh'
@@ -175,7 +176,7 @@ class reverse_forward_tunnel(threading.Thread):
     M = Color('{yellow}'+M+'{/yellow}')
     print(M)
   def run(self):
-    self.transport.request_port_forward(self.host,self.port)
+    self.transport.request_port_forward("",self.port)
     while True:
         chan = self.transport.accept(1000)
         if chan is None:
@@ -271,8 +272,9 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host, lines=[]):
                 verbose('Sudo Execution finished with code {}'.format(retcode))
                 return retcode
         except Exception as e:
-            verbose('Sudo Execution failed (cmd {}) '.format(cmd))
-            verbose(e)
+            if _DEBUG_SUDO:
+                verbose('Sudo Execution failed (cmd {}) '.format(cmd))
+                verbose(e)
 #            return None, None
 
         time.sleep(0.01)
@@ -563,7 +565,7 @@ def main():
             M = '       Forwarding remote {}:{} to {}:{}'.format('127.0.0.1', p1,'127.0.0.1', p2)
             M = Color('{yellow}'+M+'{/yellow}')
             print(M)
-            t = reverse_forward_tunnel('127.0.0.1', p1, '127.0.0.1', p2, ssh.get_transport())
+            t = reverse_forward_tunnel(remote[0], p1, host[0], p2, ssh.get_transport())
             t.daemon = True
             t.start()
 
