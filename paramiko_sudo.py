@@ -18,13 +18,14 @@ SOCAT_TIMEOUT = 1800
 TUNNELS = {}
 SSH_EXEC_TIMEOUT = 10
 HELP = """Paramiko Sudo Forwarded SSH Connection"""
-
+COMMANDS = ['sudo','socat','chmod','chown']
 
 def verbose(s):
     if DEBUG_MODE:
         print(s)
 
 def sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host):
+    STDERR_FILE = '/tmp/ee'
     CMD = '/root/{}'.format(REMOTE_EXEC_SCRIPT)
     START_MS = time.time()
     ExecuteLocal = __sudoCommand(CMD, ssh, options, host)
@@ -32,7 +33,7 @@ def sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host
     ExecuteLocal.start()
     while True:
         print('       [Playbook Execution Monitor]      stdout: {} lines, {} bytes...{} exit_code'.format(len(ExecuteLocal.lines),len(json.dumps(ExecuteLocal.lines)), ExecuteLocal.exit_code))
-        if ExecuteLocal.exit_code:
+        if ExecuteLocal.exit_code is not None:
             DURATION_MS = int(time.time()-START_MS)
             print('       [Playbook Execution Monitor]      Exited {} after {}ms'.format(ExecuteLocal.exit_code,DURATION_MS))
             print('       [Playbook Execution Monitor]        Removing Remote Files....')
@@ -164,19 +165,27 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host, lines=[]):
     stdout = session.makefile('rb', -1)
     stdin.write(options.password +'\n')
     stdin.flush()
-    try:
-        for line in stdout:
-            line = line.decode().strip()
-            lines.append(line)
-            verbose('host: %s: %s' % (host[0], line))
+    while True:
+        try:
+            for line in stdout:
+                try:
+                    line = line.decode().strip()
+                except Exception as e:
+                    print('eeeeeeeeeeee {}'.format(e))
+                    continue
+                lines.append(line)
+                verbose('host: %s: stdout> %s' % (host[0], line))
 
-        retcode = stdout.channel.recv_exit_status()
-        verbose('Sudo Execution finished with code {}'.format(retcode))
-        return retcode
-    except Exception as e:
-        verbose('Sudo Execution failed')
-        verbose(e)
-        return None, None
+            retcode = stdout.channel.recv_exit_status()
+            if retcode is not None:
+                verbose('Sudo Execution finished with code {}'.format(retcode))
+                return retcode
+        except Exception as e:
+            verbose('Sudo Execution failed (cmd {}) '.format(cmd))
+            verbose(e)
+#            return None, None
+
+        time.sleep(0.01)
 
 
 class __sudoCommand(threading.Thread):
@@ -384,6 +393,7 @@ def main():
         key_filename=options.keyfile,
         look_for_keys=True,
     )    
+
 
     """   Upload Script to non root user home dir   """
     uploadScript(ssh, REMOTE_EXEC_SCRIPT,options)
