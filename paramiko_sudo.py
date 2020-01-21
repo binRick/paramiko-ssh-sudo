@@ -4,9 +4,7 @@ import paramiko, os, json, sys, socket, select, threading, traceback, subprocess
 from optparse import OptionParser
 
 DEBUG_MODE = False
-LOCAL_LISTEN_PORT = 49225
-REMOTE_LISTEN_PORT = 2251
-SUDO_ARGS='-k -H -u root'
+SUDO_ARGS='-k -E -H -u root'
 SHELL  = 'sh'
 SHELL_ARGS = ""
 PTY_TERM = 'xterm'
@@ -14,13 +12,11 @@ PTY_WIDTH = 160
 PTY_HEIGHT = 24
 PTY_WIDTH_PIXELS = 0
 PTY_HEIGHT_PIXELS = 0    
-PTY_ENV = {'abc':'def','wow':123}
+PTY_ENV = {'PARAMIKO_SUDO_WRAPPER':'1'}
 SOCAT_PATH = '/usr/bin/socat'
 SOCAT_TIMEOUT = 1800
 TUNNELS = {}
 SSH_EXEC_TIMEOUT = 10
-DEFAULT_SSH_PORT = 22
-DSTAT = 'dstat -alp --top-cpu --top-cputime-avg 1'
 HELP = """Paramiko Sudo Forwarded SSH Connection"""
 
 
@@ -57,7 +53,7 @@ def exec_tunnel(ssh,cmd):
     stdin, stdout, stderr = ssh.exec_command(cmd);
     stdout_lines = []
     for line in stdout:
-        #print('[{}] => '.format(cmd) + line.strip('\n'))
+        verbose('[{}] => '.format(cmd) + line.strip('\n'))
         stdout_lines.append(line)
     return stdout_lines
 
@@ -164,23 +160,21 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host, lines=[]):
     session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
     session.settimeout(SSH_EXEC_TIMEOUT)
     session.exec_command(cmd)
-
     stdin = session.makefile('wb', -1)
     stdout = session.makefile('rb', -1)
-
     stdin.write(options.password +'\n')
     stdin.flush()
     try:
         for line in stdout:
             line = line.decode().strip()
             lines.append(line)
-            #print('host: %s: %s' % (host[0], line))
+            verbose('host: %s: %s' % (host[0], line))
 
         retcode = stdout.channel.recv_exit_status()
-        #print('Sudo Execution finished with code {}'.format(retcode))
+        verbose('Sudo Execution finished with code {}'.format(retcode))
         return retcode
     except Exception as e:
-        #print('Sudo Execution failed')
+        verbose('Sudo Execution failed')
         verbose(e)
         return None, None
 
@@ -295,6 +289,15 @@ def parse_options():
         default=None,
         help="exec_script",
     )
+    parser.add_option(
+        "-R",
+        "--remote-port",
+        action="store",
+        type="int",
+        dest="remote_port",
+        default=2251,
+        help="remote_port",
+    )
 
     options, args = parser.parse_args()
 
@@ -316,8 +319,8 @@ def parse_options():
     verbose('options.log_files={}'.format(options.log_files))
 
     DEBUG_MODE = options.verbose
-    host, port = get_host_port(options.host, DEFAULT_SSH_PORT)
-    remote_host, remote_port = get_host_port(options.remote, DEFAULT_SSH_PORT)
+    host, port = get_host_port(options.host, 22)
+    remote_host, remote_port = get_host_port(options.remote, 22)
     return options, (host,port), (remote_host, remote_port)
 
 def uploadScript(ssh, REMOTE_EXEC_SCRIPT,options):
@@ -397,10 +400,9 @@ def main():
     """   Chown root Script   """
     sudoChownScript(ssh, REMOTE_EXEC_SCRIPT, 'root:root', options, host)
 
-
     """   Local Socat Listener Local Socket  > File  """
     for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
-        localSocat = __localSocat(LOCAL_LISTEN_PORT+i, REMOTE_FORWARDED_FILE)
+        localSocat = __localSocat(remote[1]+i, REMOTE_FORWARDED_FILE)
         localSocat.daemon = True
         localSocat.start()
         time.sleep(0.1)
@@ -408,7 +410,7 @@ def main():
     """   Setup TCP Forwards From Remote to local host """
     for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
         REMOTE_PORT = remote[1] + i
-        TUNNELS[i] = reverse_forward_tunnel(remote[0], REMOTE_PORT, host[0], REMOTE_LISTEN_PORT + i, ssh.get_transport())
+        TUNNELS[i] = reverse_forward_tunnel(remote[0], REMOTE_PORT, host[0], options.remote_port + i, ssh.get_transport())
         TUNNELS[i].daemon = True
         TUNNELS[i].start()
         verbose(">> [tunnel #{} ] Started (remote file {} => remote port {})".format(i,REMOTE_FORWARDED_FILE, REMOTE_PORT))
@@ -421,18 +423,17 @@ def main():
     """   Remote Socat Listener Local File  > Socket """
     for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
         verbose("""   Remote Socat Listener Local File  > Socket #{} {}""".format(i,REMOTE_FORWARDED_FILE))
-        agent = __socat(ssh, REMOTE_FORWARDED_FILE, host, options, REMOTE_LISTEN_PORT + i)
+        agent = __socat(ssh, REMOTE_FORWARDED_FILE, host, options, options.remote_port + i)
         agent.daemon = True
         agent.start()
         verbose('remote socat launched...........')
         time.sleep(0.1)
 
-
-    """   Execute Playbook via sudo in local connection mode  """
+    """   Execute Playbook via sudo in local connection mode  via ssh """
     sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host)
 
     while True:
-        print('Checking if execution is complete.....')
+        verbose('Checking if execution is complete.....')
         time.sleep(5)
 
 
