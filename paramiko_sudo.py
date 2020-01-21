@@ -2,6 +2,7 @@
 from __future__ import print_function
 import paramiko, os, json, sys, socket, select, threading, traceback, subprocess, time, getpass, tempfile, pathlib
 from optparse import OptionParser
+from colorclass import Color
 
 DEBUG_MODE = False
 SUDO_ARGS='-k -E -H -u root'
@@ -20,6 +21,17 @@ SSH_EXEC_TIMEOUT = 10
 HELP = """Paramiko Sudo Forwarded SSH Connection"""
 COMMANDS = ['sudo','socat','chmod','chown']
 
+
+try:
+    import SocketServer
+except ImportError:
+    import socketserver as SocketServer
+
+
+class ForwardServer(SocketServer.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
 def verbose(s):
     if DEBUG_MODE:
         print(s)
@@ -32,7 +44,9 @@ def sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host
     ExecuteLocal.daemon = True
     ExecuteLocal.start()
     while True:
-        print('       [Playbook Execution Monitor]      stdout: {} lines, {} bytes...{} exit_code'.format(len(ExecuteLocal.lines),len(json.dumps(ExecuteLocal.lines)), ExecuteLocal.exit_code))
+        M = '       [Playbook Execution Monitor]      stdout: {} lines, {} bytes...{} exit_code'.format(len(ExecuteLocal.lines),len(json.dumps(ExecuteLocal.lines)), ExecuteLocal.exit_code)
+        M = Color('{cyan}'+M+'{/cyan}')
+        print(M)
         if ExecuteLocal.exit_code is not None:
             DURATION_MS = int(time.time()-START_MS)
             print('       [Playbook Execution Monitor]      Exited {} after {}ms'.format(ExecuteLocal.exit_code,DURATION_MS))
@@ -50,6 +64,55 @@ def sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host
 def generateSudoCommand(COMMAND):
     return "command sudo {} {} {} -{}c \"{}\"".format(SUDO_ARGS, generateEnvironmentString(), SHELL, SHELL_ARGS, COMMAND)
 
+
+class Handler(SocketServer.BaseRequestHandler):
+    def handle(self):
+        verbose("Tunnel started")
+        try:
+            chan = self.ssh_transport.open_channel(
+                "direct-tcpip",
+                (self.chain_host, self.chain_port),
+                self.request.getpeername(),
+            )
+        except Exception as e:
+            verbose(
+                "Incoming request to %s:%d failed: %s"
+                % (self.chain_host, self.chain_port, repr(e))
+            )
+            return
+        if chan is None:
+            verbose(
+                "Incoming request to %s:%d was rejected by the SSH server."
+                % (self.chain_host, self.chain_port)
+            )
+            return
+
+        verbose(
+            "Connected!  Tunnel open %r -> %r -> %r"
+            % (
+                self.request.getpeername(),
+                chan.getpeername(),
+                (self.chain_host, self.chain_port),
+            )
+        )
+        while True:
+            r, w, x = select.select([self.request, chan], [], [])
+            if self.request in r:
+                data = self.request.recv(1024)
+                if len(data) == 0:
+                    break
+                chan.send(data)
+            if chan in r:
+                data = chan.recv(1024)
+                if len(data) == 0:
+                    break
+                self.request.send(data)
+
+        peername = self.request.getpeername()
+        chan.close()
+        self.request.close()
+        verbose("Tunnel closed from %r" % (peername,))
+
 def exec_tunnel(ssh,cmd):
     stdin, stdout, stderr = ssh.exec_command(cmd);
     stdout_lines = []
@@ -65,7 +128,9 @@ def handler(chan, host, port):
     except Exception as e:
         verbose("Forwarding request to %s:%d failed: %r" % (host, port, e))
         return
-    verbose("Connected!  Tunnel open %r -> %r -> %r"% (chan.origin_addr, chan.getpeername(), (host, port)))
+    M = "Connected!  Tunnel open %r -> %r -> %r"% (chan.origin_addr, chan.getpeername(), (host, port))
+    M = Color('{green}'+M+'{/green}')
+    print(M)
     while True:
         r, w, x = select.select([sock, chan], [], [])
         if sock in r:
@@ -78,9 +143,23 @@ def handler(chan, host, port):
             if len(data) == 0:
                 break
             sock.send(data)
+        time.sleep(0.1)
     chan.close()
     sock.close()
     verbose("Tunnel closed from %r" % (chan.origin_addr,))
+
+def forward_tunnel(local_port, remote_host, remote_port, transport):
+    # this is a little convoluted, but lets me configure things for the Handler
+    # object.  (SocketServer doesn't give Handlers any way to access the outer
+    # server normally.)
+    class SubHander(Handler):
+        chain_host = remote_host
+        chain_port = remote_port
+        ssh_transport = transport
+
+    ForwardServer(("", local_port), SubHander).serve_forever()
+
+
 
 
 class reverse_forward_tunnel(threading.Thread):
@@ -92,18 +171,27 @@ class reverse_forward_tunnel(threading.Thread):
     self.host = host
     self.port = port
     self.transport = transport
-    print('host={} remote_host={}'.format(self.host,self.remote_host))
+    M = '[reverse_forward_tunnel]  host={} port={}, remote_host={} remote_port={}'.format(self.host,self.port,self.remote_host,self.remote_port)
+    M = Color('{yellow}'+M+'{/yellow}')
+    print(M)
   def run(self):
-    self.transport.request_port_forward("",self.port)
+    self.transport.request_port_forward(self.host,self.port)
     while True:
         chan = self.transport.accept(1000)
         if chan is None:
             continue
+        M = '[reverse_forward_tunnel] host={} port={}, remote_host={} remote_port={}  :: active chan '.format(self.host,self.port,self.remote_host,self.remote_port)
+        M = Color('{yellow}'+M+'{/yellow}')
+        print(M)
         thr = threading.Thread(
             target=handler, args=(chan, self.remote_host, self.remote_port)
         )
         thr.setDaemon(True)
         thr.start()
+        time.sleep(0.1)
+    M = '[reverse_forward_tunnel]  host={} port={}, remote_host={} remote_port={} :: EXITING'.format(self.host,self.port,self.remote_host,self.remote_port)
+    M = Color('{red}'+M+'{/red}')
+    print(M)
 
 
 class __socat(threading.Thread):
@@ -335,12 +423,21 @@ def parse_options():
     if options.host is None:
         parser.error("Host address required (-h).")
 
+    DEBUG_MODE = options.verbose
+
     options.log_files = options.log_files.split(',')
+    verbose('options.log_files={}'.format(options.log_files))
+    P = []
     if options.forwarded_ports is not None:
         options.forwarded_ports = options.forwarded_ports.split(',')
-    verbose('options.log_files={}'.format(options.log_files))
+        for p in options.forwarded_ports:
+            print(p)
+            _p = p.split(':')
+            P.append([int(_p[0]),int(_p[1])])
+    else:
+        options.forwarded_ports = []
+    verbose('options.forwarded_ports={}'.format(options.forwarded_ports))
 
-    DEBUG_MODE = options.verbose
     host, port = get_host_port(options.host, 22)
     remote_port = get_host_port(options.remote, 22)
     return options, (host,port), (remote_port)
@@ -408,6 +505,10 @@ def main():
     )    
 
 
+    #forward_tunnel(
+    #        12345, '127.0.0.1',12346, ssh.get_transport()
+    #)
+
     """   Upload Script to non root user home dir   """
     uploadScript(ssh, REMOTE_EXEC_SCRIPT,options)
 
@@ -423,14 +524,6 @@ def main():
     """   Chown root Script   """
     sudoChownScript(ssh, REMOTE_EXEC_SCRIPT, 'root:root', options, host)
 
-    """   Forward Ports """
-    if options.forwarded_ports is not None:
-        print(options.forwarded_ports)
-        for i, P in enumerate(options.forwarded_ports):
-            p1 = int(P.split(':')[0])
-            p2 = int(P.split(':')[1])
-            print('Forwarding remote {} to local {}'.format(p1,p2))
-            TUNNELS[i+10] = reverse_forward_tunnel(remote[0], p1, host[0], p2, ssh.get_transport())
 
     """   Local Socat Listener Local Socket  > File  """
     for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
@@ -460,6 +553,19 @@ def main():
         agent.start()
         verbose('remote socat launched...........')
         time.sleep(0.1)
+
+    """   Forward Ports """
+    if options.forwarded_ports is not None:
+        print(options.forwarded_ports)
+        for i, P in enumerate(options.forwarded_ports):
+            p1 = int(P.split(':')[0])
+            p2 = int(P.split(':')[1])
+            M = '       Forwarding remote {}:{} to {}:{}'.format('127.0.0.1', p1,'127.0.0.1', p2)
+            M = Color('{yellow}'+M+'{/yellow}')
+            print(M)
+            t = reverse_forward_tunnel('127.0.0.1', p1, '127.0.0.1', p2, ssh.get_transport())
+            t.daemon = True
+            t.start()
 
     """   Execute Playbook via sudo in local connection mode  via ssh """
     sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host)
