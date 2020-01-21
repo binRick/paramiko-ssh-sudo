@@ -37,6 +37,26 @@ DSTAT = 'dstat -alp --top-cpu --top-cputime-avg 1'
 
 HELP = """Paramiko Sudo Forwarded SSH Connection"""
 
+def sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host):
+    CMD = '/root/{}'.format(REMOTE_EXEC_SCRIPT)
+    START_MS = time.time()
+    ExecuteLocal = __sudoCommand(CMD, ssh, options, host)
+    ExecuteLocal.daemon = True
+    ExecuteLocal.start()
+    while True:
+        print('       [Playbook Execution Monitor]      stdout: {} lines, {} bytes...{} exit_code'.format(len(ExecuteLocal.lines),len(json.dumps(ExecuteLocal.lines)), ExecuteLocal.exit_code))
+        if ExecuteLocal.exit_code:
+            DURATION_MS = int(time.time()-START_MS)
+            print('       [Playbook Execution Monitor]      Exited {} after {}ms'.format(ExecuteLocal.exit_code,DURATION_MS))
+            if ExecuteLocal.exit_code != 0:
+                print('       [Playbook Execution Monitor]      FAILED!')
+                sys.exit(ExecuteLocal.exit_code)
+            else:
+                print('       [Playbook Execution Monitor]      OK')
+                sys.exit(0)
+            
+        time.sleep(3.0)
+
 def generateSudoCommand(COMMAND):
     return "command sudo {} {} {} -{}c \"{}\"".format(SUDO_ARGS, generateEnvironmentString(), SHELL, SHELL_ARGS, COMMAND)
 
@@ -138,7 +158,7 @@ class __ls(threading.Thread):
     cmd = 'ls /'
     exec_tunnel(self.ssh, cmd)
 
-def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host):
+def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host, lines=[]):
     session = ssh.get_transport().open_session()
     session.set_combine_stderr(True)
     session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
@@ -153,14 +173,16 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host):
     try:
         for line in stdout:
             line = line.decode().strip()
+            lines.append(line)
             print('host: %s: %s' % (host[0], line))
 
         retcode = stdout.channel.recv_exit_status()
         print('Sudo Execution finished with code {}'.format(retcode))
+        return retcode
     except Exception as e:
         print('Sudo Execution failed')
         verbose(e)
-        pass
+        return None, None
 
 
 class __sudoCommand(threading.Thread):
@@ -171,10 +193,11 @@ class __sudoCommand(threading.Thread):
     self.options  = options
     self.host = host
     self.COMMAND = COMMAND
+    self.exit_code = None
+    self.lines = []
   def run(self):
     cmd = generateSudoCommand(self.COMMAND)
-
-    EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host)
+    self.exit_code = EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host, self.lines)
 
 
 def generateEnvironmentString():
@@ -276,19 +299,23 @@ def parse_options():
         parser.error("Incorrect number of arguments.")
     if options.remote is None:
         parser.error("Remote address required (-r).")
+    if options.exec_script is None or not os.path.exists(options.exec_script):
+        parser.error("Exec Script (-E).")
     if options.host is None:
-        parser.error("Host address required (-r).")
+        parser.error("Host address required (-h).")
 
     DEBUG_MODE = options.verbose
     host, port = get_host_port(options.host, DEFAULT_SSH_PORT)
     remote_host, remote_port = get_host_port(options.remote, DEFAULT_SSH_PORT)
     return options, (host,port), (remote_host, remote_port)
 
-def uploadScript(ssh, REMOTE_EXEC_SCRIPT):
+def uploadScript(ssh, REMOTE_EXEC_SCRIPT,options):
     REMOTE_EXEC_SCRIPT_CONTENTS = json.dumps({'abc':123})
+    with open(options.exec_script,'r') as f:
+        REMOTE_EXEC_SCRIPT_CONTENTS = f.read().strip()
     REMOTE_EXEC_SCRIPT_MODE = 0o700
     with open(REMOTE_EXEC_SCRIPT,'w') as f:
-        f.write(REMOTE_EXEC_SCRIPT)
+        f.write(REMOTE_EXEC_SCRIPT_CONTENTS)
     with open(REMOTE_EXEC_SCRIPT,'r') as f:
         REMOTE_EXEC_SCRIPT_BYTES = len(f.read())
     sftp = paramiko.SFTPClient.from_transport(ssh.get_transport())
@@ -298,6 +325,7 @@ def uploadScript(ssh, REMOTE_EXEC_SCRIPT):
     if os.path.exists(REMOTE_EXEC_SCRIPT):
       os.remove(REMOTE_EXEC_SCRIPT)
     print('uploaded {} bytes to remote file {}'.format(REMOTE_EXEC_SCRIPT_BYTES, REMOTE_EXEC_SCRIPT, ))
+
 
 def sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host):
     CMD = 'mv -f ~{}/{} /root/.'.format(options.user, REMOTE_EXEC_SCRIPT)
@@ -338,7 +366,7 @@ def main():
     )    
 
     """   Upload Script to non root user home dir   """
-    uploadScript(ssh, REMOTE_EXEC_SCRIPT)
+    uploadScript(ssh, REMOTE_EXEC_SCRIPT,options)
 
     time.sleep(0.1)
     """   Move to root dir   """
@@ -358,8 +386,7 @@ def main():
     localSocat.daemon = True
     localSocat.start()
 
-
-    """   Setup TCP Tunnel   """
+    """   Setup TCP Forwards From Remote to local host """
     TUNNELS['tunnel1'] = reverse_forward_tunnel(remote[0], remote[1], host[0], REMOTE_LISTEN_PORT, ssh.get_transport())
     TUNNELS['tunnel1'].daemon = True
     TUNNELS['tunnel1'].start()
@@ -372,6 +399,8 @@ def main():
     agent.start()
     print('remote socat launched...........')
 
+    """   Execute Playbook via sudo in local connection mode  """
+    sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host)
 
     while True:
         print('Checking if execution is complete.....')
