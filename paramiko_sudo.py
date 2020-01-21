@@ -193,16 +193,17 @@ class reverse_forward_tunnel(threading.Thread):
 
 
 class __socat(threading.Thread):
-  def __init__(self, ssh, REMOTE_FORWARDED_FILE, host, options, REMOTE_LISTEN_PORT):
+  def __init__(self, ssh, REMOTE_FORWARDED_FILE, host, options, REMOTE_LISTEN_PORT, REMOTE_SOCAT_PATH):
     threading.Thread.__init__(self)
     self.kill_received = False
     self.ssh = ssh
     self.options = options
     self.host = host
+    self.REMOTE_SOCAT_PATH = REMOTE_SOCAT_PATH
     self.REMOTE_LISTEN_PORT = REMOTE_LISTEN_PORT
     self.REMOTE_FORWARDED_FILE = REMOTE_FORWARDED_FILE
   def run(self):
-    cmd = '{} -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:{}'.format(SOCAT_PATH,self.REMOTE_FORWARDED_FILE,self.REMOTE_LISTEN_PORT)
+    cmd = '{} -u FILE:{},ignoreeof,seek-end tcp:127.0.0.1:{}'.format(self.REMOTE_SOCAT_PATH,self.REMOTE_FORWARDED_FILE,self.REMOTE_LISTEN_PORT)
     cmd = generateSudoCommand(cmd)
     while True:
         session = self.ssh.get_transport().open_session()
@@ -266,7 +267,7 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host, lines=[]):
             retcode = stdout.channel.recv_exit_status()
             if retcode is not None:
                 verbose('Sudo Execution finished with code {}'.format(retcode))
-                return retcode
+                return retcode, lines
         except Exception as e:
             if _DEBUG_SUDO:
                 verbose('Sudo Execution failed (cmd {}) '.format(cmd))
@@ -287,7 +288,7 @@ class __sudoCommand(threading.Thread):
     self.lines = []
   def run(self):
     cmd = generateSudoCommand(self.COMMAND)
-    self.exit_code = EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host, self.lines)
+    self.exit_code, self.lines = EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host, self.lines)
 
 def generateEnvironmentString():
     PTY_ENV_STR = ''
@@ -467,6 +468,21 @@ def sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host):
     mv.start()
     verbose('__sudo mv finished')
 
+def sudoGetRemoteSocatPath(ssh, options, host):
+    CMD = 'command -v socat'
+    s = __sudoCommand(CMD, ssh, options, host)
+    s.daemon = False
+    R = s.start()
+    verbose('__sudo command -v socat finished: {}'.format(R))
+    while True:
+        print('code {}'.format(s.exit_code))
+        if s.exit_code == 0:
+            print('lines {}'.format(s.lines))
+            SOCAT_PATH = s.lines[-1]
+            print('SOCAT_PATH {}'.format(SOCAT_PATH))
+            return SOCAT_PATH
+        time.sleep(1.0)
+
 def sudoRmScript(ssh, REMOTE_EXEC_SCRIPT, options, host):
     CMD = 'command rm -f /root/{}'.format(REMOTE_EXEC_SCRIPT)
     rm = __sudoCommand(CMD, ssh, options, host)
@@ -509,6 +525,9 @@ def main():
         key_filename=options.keyfile,
         look_for_keys=True,
     )
+
+    REMOTE_SOCAT_PATH = sudoGetRemoteSocatPath(ssh, options, host)
+    verbose('REMOTE_SOCAT_PATH={}'.format(REMOTE_SOCAT_PATH))
     
     """   Reverse Forwarded Ports (remote -> local) """
     if options.forwarded_ports is not None:
@@ -563,7 +582,7 @@ def main():
     """   Remote Socat Listener Local File  > Socket """
     for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
         verbose("""   Remote Socat Listener Local File  > Socket #{} {}""".format(i,REMOTE_FORWARDED_FILE))
-        agent = __socat(ssh, REMOTE_FORWARDED_FILE, host, options, options.remote_port + i)
+        agent = __socat(ssh, REMOTE_FORWARDED_FILE, host, options, options.remote_port + i, REMOTE_SOCAT_PATH)
         agent.daemon = True
         agent.start()
         verbose('remote socat launched...........')
