@@ -5,10 +5,8 @@ cd $( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 __PASS=Q8DHmYMqXAksdf8yhU
 __HOST=vpn299:22
 __REMOTE=127.0.0.1:49225
-export _REMOTE_PORT=3398
-
+_REMOTE_PORT=38229
 __LOGS="-L /tmp/vpntech-bp/$UUID/ansible.log,/tmp/vpntech-bp/$UUID/audit.json"
-
 __EXEC="-E /home/whmcs/.vpntech-tmp/.playEnvs/delegatedServer-${PLAY_ID}.sh"
 
 export _HOST=$__HOST _REMOTE=$__REMOTE _HOST=$__HOST _USER=bduser1 _PASS=$__PASS 

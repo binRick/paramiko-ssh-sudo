@@ -320,8 +320,8 @@ def parse_options():
 
     DEBUG_MODE = options.verbose
     host, port = get_host_port(options.host, 22)
-    remote_host, remote_port = get_host_port(options.remote, 22)
-    return options, (host,port), (remote_host, remote_port)
+    remote_port = get_host_port(options.remote, 22)
+    return options, (host,port), (remote_port)
 
 def uploadScript(ssh, REMOTE_EXEC_SCRIPT,options):
     REMOTE_EXEC_SCRIPT_CONTENTS = json.dumps({'abc':123})
