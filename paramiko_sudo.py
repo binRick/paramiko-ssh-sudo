@@ -92,6 +92,7 @@ class reverse_forward_tunnel(threading.Thread):
     self.host = host
     self.port = port
     self.transport = transport
+    print('host={} remote_host={}'.format(self.host,self.remote_host))
   def run(self):
     self.transport.request_port_forward("",self.port)
     while True:
@@ -282,6 +283,15 @@ def parse_options():
         help="private key file to use for SSH authentication",
     )
     parser.add_option(
+        "-F",
+        "--forwarded-ports",
+        action="store",
+        type="string",
+        dest="forwarded_ports",
+        default=None,
+        help="forwarded_ports",
+    )
+    parser.add_option(
         "-L",
         "--log-files",
         action="store",
@@ -326,6 +336,8 @@ def parse_options():
         parser.error("Host address required (-h).")
 
     options.log_files = options.log_files.split(',')
+    if options.forwarded_ports is not None:
+        options.forwarded_ports = options.forwarded_ports.split(',')
     verbose('options.log_files={}'.format(options.log_files))
 
     DEBUG_MODE = options.verbose
@@ -410,6 +422,15 @@ def main():
     time.sleep(0.1)
     """   Chown root Script   """
     sudoChownScript(ssh, REMOTE_EXEC_SCRIPT, 'root:root', options, host)
+
+    """   Forward Ports """
+    if options.forwarded_ports is not None:
+        print(options.forwarded_ports)
+        for i, P in enumerate(options.forwarded_ports):
+            p1 = int(P.split(':')[0])
+            p2 = int(P.split(':')[1])
+            print('Forwarding remote {} to local {}'.format(p1,p2))
+            TUNNELS[i+10] = reverse_forward_tunnel(remote[0], p1, host[0], p2, ssh.get_transport())
 
     """   Local Socat Listener Local Socket  > File  """
     for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
