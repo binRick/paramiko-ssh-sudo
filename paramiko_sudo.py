@@ -163,6 +163,7 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host, lines=[]):
     session.exec_command(cmd)
     stdin = session.makefile('wb', -1)
     stdout = session.makefile('rb', -1)
+#    stderr = session.makefile_stderr('rb', -1)
     stdin.write(options.password +'\n')
     stdin.flush()
     while True:
