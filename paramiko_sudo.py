@@ -8,8 +8,8 @@ try:
 except ImportError:
     import socketserver as SocketServer
 
-_DEBUG_SUDO = False
-DEBUG_MODE = False
+_DEBUG_SUDO = True
+DEBUG_MODE = True
 SUDO_ARGS='-k -E -H -u root'
 SHELL  = 'sh'
 SHELL_ARGS = ""
@@ -49,8 +49,14 @@ def sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host
         if ExecuteLocal.exit_code is not None:
             DURATION_MS = int(time.time()-START_MS)
             print('       [Playbook Execution Monitor]      Exited {} after {}ms'.format(ExecuteLocal.exit_code,DURATION_MS))
-            print('       [Playbook Execution Monitor]        Removing Remote Files....')
-            print('       [Playbook Execution Monitor]        Checking Local Files....')
+
+            print('       [Playbook Execution Monitor]        Removing Remote Script....')
+            time.sleep(1.0)
+            sudoRmScript(ssh, REMOTE_EXEC_SCRIPT, options, host)
+            print('       [Playbook Execution Monitor]                  Removed')
+
+            print('       [Playbook Execution Monitor]        Checking Local Log Files....')
+
             if ExecuteLocal.exit_code != 0:
                 print('       [Playbook Execution Monitor]      FAILED!')
                 sys.exit(ExecuteLocal.exit_code)
@@ -221,7 +227,7 @@ class __localSocat(threading.Thread):
     cwd = '/'
     env = os.environ.copy()
     while True:
-        #print('local socat cmd=\n{}\n'.format(cmd))
+        print('local socat cmd=\n{}\n'.format(cmd))
         proc = subprocess.Popen(cmd.split(' '),stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env, shell=False)
         stdout, stderr = proc.communicate()
         exit_code = proc.wait()
@@ -461,6 +467,14 @@ def sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host):
     mv.start()
     verbose('__sudo mv finished')
 
+def sudoRmScript(ssh, REMOTE_EXEC_SCRIPT, options, host):
+    CMD = 'command rm -f /root/{}'.format(REMOTE_EXEC_SCRIPT)
+    rm = __sudoCommand(CMD, ssh, options, host)
+    rm.daemon = False
+    rm.start()
+    verbose('__sudo rm finished')
+
+
 def sudoChmodScript(ssh, REMOTE_EXEC_SCRIPT, MODE, options, host):
     CMD = 'chmod {} /root/{}'.format(MODE, REMOTE_EXEC_SCRIPT)
     mv = __sudoCommand(CMD, ssh, options, host)
@@ -512,13 +526,17 @@ def main():
     """   Upload Script to non root user home dir   """
     uploadScript(ssh, REMOTE_EXEC_SCRIPT,options)
 
+
     """   Move to root dir   """
+    time.sleep(1.0)
     sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host)
 
     """   Chmod root Script   """
+    time.sleep(1.0)
     sudoChmodScript(ssh, REMOTE_EXEC_SCRIPT, '0700', options, host)
 
     """   Chown root Script   """
+    time.sleep(1.0)
     sudoChownScript(ssh, REMOTE_EXEC_SCRIPT, 'root:root', options, host)
 
 

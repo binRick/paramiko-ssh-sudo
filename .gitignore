@@ -1,3 +1,6 @@
 dev.sh
 *.swp
 tmp*
+.venv
+t
+t2
