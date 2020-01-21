@@ -3,6 +3,10 @@ from __future__ import print_function
 import paramiko, os, json, sys, socket, select, threading, traceback, subprocess, time, getpass, tempfile, pathlib
 from optparse import OptionParser
 from colorclass import Color
+try:
+    import SocketServer
+except ImportError:
+    import socketserver as SocketServer
 
 _DEBUG_SUDO = False
 DEBUG_MODE = False
@@ -21,12 +25,6 @@ TUNNELS = {}
 SSH_EXEC_TIMEOUT = 10
 HELP = """Paramiko Sudo Forwarded SSH Connection"""
 COMMANDS = ['sudo','socat','chmod','chown']
-
-
-try:
-    import SocketServer
-except ImportError:
-    import socketserver as SocketServer
 
 
 class ForwardServer(SocketServer.ThreadingTCPServer):
@@ -144,23 +142,17 @@ def handler(chan, host, port):
             if len(data) == 0:
                 break
             sock.send(data)
-        time.sleep(0.1)
     chan.close()
     sock.close()
     verbose("Tunnel closed from %r" % (chan.origin_addr,))
 
 def forward_tunnel(local_port, remote_host, remote_port, transport):
-    # this is a little convoluted, but lets me configure things for the Handler
-    # object.  (SocketServer doesn't give Handlers any way to access the outer
-    # server normally.)
     class SubHander(Handler):
         chain_host = remote_host
         chain_port = remote_port
         ssh_transport = transport
 
     ForwardServer(("", local_port), SubHander).serve_forever()
-
-
 
 
 class reverse_forward_tunnel(threading.Thread):
@@ -189,7 +181,6 @@ class reverse_forward_tunnel(threading.Thread):
         )
         thr.setDaemon(True)
         thr.start()
-        time.sleep(0.1)
     M = '[reverse_forward_tunnel]  host={} port={}, remote_host={} remote_port={} :: EXITING'.format(self.host,self.port,self.remote_host,self.remote_port)
     M = Color('{red}'+M+'{/red}')
     print(M)
@@ -253,7 +244,6 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host, lines=[]):
     session.exec_command(cmd)
     stdin = session.makefile('wb', -1)
     stdout = session.makefile('rb', -1)
-#    stderr = session.makefile_stderr('rb', -1)
     stdin.write(options.password +'\n')
     stdin.flush()
     while True:
@@ -275,7 +265,6 @@ def EXECUTE_SUDO_COMMAND(cmd,ssh,options,host, lines=[]):
             if _DEBUG_SUDO:
                 verbose('Sudo Execution failed (cmd {}) '.format(cmd))
                 verbose(e)
-#            return None, None
 
         time.sleep(0.01)
 
@@ -294,14 +283,11 @@ class __sudoCommand(threading.Thread):
     cmd = generateSudoCommand(self.COMMAND)
     self.exit_code = EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host, self.lines)
 
-
 def generateEnvironmentString():
     PTY_ENV_STR = ''
     for k in PTY_ENV.keys():
         PTY_ENV_STR += ' {}={}'.format(k,PTY_ENV[k])
     return PTY_ENV_STR
-
-
 
 def get_host_port(spec, default_port):
     args = (spec.split(":", 1) + [default_port])[:2]
@@ -491,38 +477,47 @@ def sudoChownScript(ssh, REMOTE_EXEC_SCRIPT, MODE, options, host):
 
 
 def main():
+    """   Setup Requirements  """
     options, host, remote = parse_options()
     tf = tempfile.NamedTemporaryFile(delete=False)
     REMOTE_EXEC_SCRIPT = "{}".format(os.path.basename(tf.name))
+
+    """   Configure SSH Connection  """
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.load_system_host_keys()
 
+    """   Establish SSH Connection  """
     ssh.connect(
         host[0], host[1],
         username=options.user, 
         password=options.password,
         key_filename=options.keyfile,
         look_for_keys=True,
-    )    
-
-
-    #forward_tunnel(
-    #        12345, '127.0.0.1',12346, ssh.get_transport()
-    #)
+    )
+    
+    """   Reverse Forwarded Ports (remote -> local) """
+    if options.forwarded_ports is not None:
+        print(options.forwarded_ports)
+        for i, P in enumerate(options.forwarded_ports):
+            p1 = int(P.split(':')[0])
+            p2 = int(P.split(':')[1])
+            M = '       Forwarding remote {}:{} to {}:{}'.format('127.0.0.1', p1,'127.0.0.1', p2)
+            M = Color('{yellow}'+M+'{/yellow}')
+            print(M)
+            TUNNELS[i+100] = reverse_forward_tunnel(remote[0], p1, host[0], p2, ssh.get_transport())
+            TUNNELS[i+100].daemon = True
+            TUNNELS[i+100].start()
 
     """   Upload Script to non root user home dir   """
     uploadScript(ssh, REMOTE_EXEC_SCRIPT,options)
 
-    time.sleep(0.1)
     """   Move to root dir   """
     sudoMoveScript(ssh, REMOTE_EXEC_SCRIPT, options, host)
 
-    time.sleep(0.1)
     """   Chmod root Script   """
     sudoChmodScript(ssh, REMOTE_EXEC_SCRIPT, '0700', options, host)
 
-    time.sleep(0.1)
     """   Chown root Script   """
     sudoChownScript(ssh, REMOTE_EXEC_SCRIPT, 'root:root', options, host)
 
@@ -555,19 +550,6 @@ def main():
         agent.start()
         verbose('remote socat launched...........')
         time.sleep(0.1)
-
-    """   Forward Ports """
-    if options.forwarded_ports is not None:
-        print(options.forwarded_ports)
-        for i, P in enumerate(options.forwarded_ports):
-            p1 = int(P.split(':')[0])
-            p2 = int(P.split(':')[1])
-            M = '       Forwarding remote {}:{} to {}:{}'.format('127.0.0.1', p1,'127.0.0.1', p2)
-            M = Color('{yellow}'+M+'{/yellow}')
-            print(M)
-            t = reverse_forward_tunnel(remote[0], p1, host[0], p2, ssh.get_transport())
-            t.daemon = True
-            t.start()
 
     """   Execute Playbook via sudo in local connection mode  via ssh """
     sudoExecuteLocalPlaybookScriptWrapper(ssh, REMOTE_EXEC_SCRIPT, options, host)
