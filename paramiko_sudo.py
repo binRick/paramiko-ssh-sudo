@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import print_function
 import paramiko, os, json, sys, socket, select, threading, traceback, subprocess, time, getpass, tempfile, pathlib
+from multiprocessing import Process, Queue
+
 from optparse import OptionParser
 from colorclass import Color
 try:
@@ -103,12 +105,12 @@ class Handler(SocketServer.BaseRequestHandler):
         while True:
             r, w, x = select.select([self.request, chan], [], [])
             if self.request in r:
-                data = self.request.recv(1024)
+                data = self.request.recv(1024*1024)
                 if len(data) == 0:
                     break
                 chan.send(data)
             if chan in r:
-                data = chan.recv(1024)
+                data = chan.recv(1024*1024)
                 if len(data) == 0:
                     break
                 self.request.send(data)
@@ -133,9 +135,11 @@ def handler(chan, host, port):
     except Exception as e:
         verbose("Forwarding request to %s:%d failed: %r" % (host, port, e))
         return
-    M = "Connected!  Tunnel open %r -> %r -> %r"% (chan.origin_addr, chan.getpeername(), (host, port))
-    M = Color('{green}'+M+'{/green}')
-    print(M)
+
+    verbose(
+        "Connected!  Tunnel open %r -> %r -> %r"
+        % (chan.origin_addr, chan.getpeername(), (host, port))
+    )
     while True:
         r, w, x = select.select([sock, chan], [], [])
         if sock in r:
@@ -152,6 +156,41 @@ def handler(chan, host, port):
     sock.close()
     verbose("Tunnel closed from %r" % (chan.origin_addr,))
 
+
+
+
+def __handler(chan, host, port):
+    sock = socket.socket()
+    read = 0
+    written = 0
+    try:
+        sock.connect((host, port))
+    except Exception as e:
+        verbose("Forwarding request to %s:%d failed: %r" % (host, port, e))
+        return
+    M = "Connected!  Tunnel open %r -> %r -> %r"% (chan.origin_addr, chan.getpeername(), (host, port))
+    M = Color('{green}'+M+'{/green}')
+    print(M)
+    while True:
+        r, w, x = select.select([sock, chan], [], [])
+        if sock in r:
+            data = sock.recv(1024)
+            if len(data) == 0:
+                break
+            read += len(data)
+            chan.send(data)
+        if chan in r:
+            data = chan.recv(1024)
+            if len(data) == 0:
+                break
+            written += len(data)
+            sock.send(data)
+    chan.close()
+    sock.close()
+    verbose("Tunnel closed from %r" % (chan.origin_addr,))
+    verbose("    {} bytes read".format(read))
+    verbose("    {} bytes written".format(written))
+
 def forward_tunnel(local_port, remote_host, remote_port, transport):
     class SubHander(Handler):
         chain_host = remote_host
@@ -161,7 +200,38 @@ def forward_tunnel(local_port, remote_host, remote_port, transport):
     ForwardServer(("", local_port), SubHander).serve_forever()
 
 
-class reverse_forward_tunnel(threading.Thread):
+
+def reverse_forward_tunnel(server_port, remote_host, remote_port, transport):
+    transport.request_port_forward("", server_port)
+    while True:
+        chan = transport.accept(1000)
+        if chan is None:
+            continue
+        thr = threading.Thread(
+            target=handler, args=(chan, remote_host, remote_port)
+        )
+        thr.setDaemon(True)
+        thr.start()
+#        time.sleep(0.01)
+
+
+
+
+
+#def reverse_forward_tunnel(server_port, remote_host, remote_port, transport):
+def __reverse_forward_tunnel(remote_host,remote_port, host, port, transport):
+    transport.request_port_forward("", port)
+    while True:
+        chan = transport.accept(1000)
+        if chan is None:
+            continue
+        thr = threading.Thread(
+            target=handler, args=(chan, remote_host, remote_port)
+        )
+        thr.setDaemon(True)
+        thr.start()
+
+class _reverse_forward_tunnel(threading.Thread):
   def __init__(self,remote_host,remote_port, host, port, transport):
     threading.Thread.__init__(self)
     self.kill_received = False
@@ -181,12 +251,12 @@ class reverse_forward_tunnel(threading.Thread):
             continue
         M = '[reverse_forward_tunnel] host={} port={}, remote_host={} remote_port={}  :: active chan '.format(self.host,self.port,self.remote_host,self.remote_port)
         M = Color('{yellow}'+M+'{/yellow}')
-        print(M)
         thr = threading.Thread(
             target=handler, args=(chan, self.remote_host, self.remote_port)
         )
         thr.setDaemon(True)
         thr.start()
+        print(M)
     M = '[reverse_forward_tunnel]  host={} port={}, remote_host={} remote_port={} :: EXITING'.format(self.host,self.port,self.remote_host,self.remote_port)
     M = Color('{red}'+M+'{/red}')
     print(M)
@@ -211,7 +281,7 @@ class __socat(threading.Thread):
         session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
         session.settimeout(SOCAT_TIMEOUT)
         L = EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host)
-        print('local socat {} => {}'.format(cmd, L))
+        #print('local socat {} => {}'.format(cmd, L))
         time.sleep(0.01)
 
 class __localSocat(threading.Thread):
@@ -229,11 +299,11 @@ class __localSocat(threading.Thread):
     cwd = '/'
     env = os.environ.copy()
     while True:
-        print('local socat cmd=\n{}\n'.format(cmd))
+        #print('local socat cmd=\n{}\n'.format(cmd))
         proc = subprocess.Popen(cmd.split(' '),stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env, shell=False)
         stdout, stderr = proc.communicate()
         exit_code = proc.wait()
-        print('local socat exited {} with {} bytes stdout, {} bytes stderr'.format(exit_code,len(stdout),len(stderr)))
+        #print('local socat exited {} with {} bytes stdout, {} bytes stderr'.format(exit_code,len(stdout),len(stderr)))
         time.sleep(0.1)
 
 class __ls(threading.Thread):
@@ -410,6 +480,8 @@ def parse_options():
     verbose('options {}'.format(options))
 
     if len(args) != 0:
+        print(args)
+        print(len(args))
         parser.error("Incorrect number of arguments.")
     if options.remote is None:
         parser.error("Remote address required (-r).")
@@ -540,9 +612,39 @@ def main():
             M = '       Forwarding remote {}:{} to {}:{}'.format('127.0.0.1', p1,'127.0.0.1', p2)
             M = Color('{yellow}'+M+'{/yellow}')
             print(M)
-            TUNNELS[i+100] = reverse_forward_tunnel(remote[0], p1, host[0], p2, ssh.get_transport())
-            TUNNELS[i+100].daemon = True
-            TUNNELS[i+100].start()
+
+            t = threading.Thread(target=reverse_forward_tunnel,args=(p2, remote[0], p1, ssh.get_transport()))
+            t.daemon = True
+            t.start()
+            #reverse_forward_tunnel(p2, remote[0], p1, ssh.get_transport())
+
+            if False:
+                try:
+                    reverse_forward_tunnel(p2, remote[0], p1, ssh.get_transport())
+                        #options.port, remote[0], remote[1], client.get_transport()
+                except KeyboardInterrupt:
+                    print("C-c: Port forwarding stopped.")
+                    sys.exit(0)
+
+
+            if False:
+#                TUNNELS[i+100] = Process(target=reverse_forward_tunnel, args=(p2, remote[0], p1, ssh.get_transport()))
+                TUNNELS[i+100] = threading.Thread(target=reverse_forward_tunnel, args=(p2, remote[0], p1, ssh.get_transport()))
+                #TUNNELS[i+100] = threading.Thread(target=_reverse_forward_tunnel, args=(host,p1,remote[0], p2, ssh.get_transport()))
+                TUNNELS[i+100].daemon = True
+                TUNNELS[i+100].start()
+                time.sleep(0.1)
+
+
+    while True:
+        time.sleep(5.0)
+
+
+
+
+
+
+
 
     """   Upload Script to non root user home dir   """
     uploadScript(ssh, REMOTE_EXEC_SCRIPT,options)
