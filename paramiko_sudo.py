@@ -211,6 +211,7 @@ class __socat(threading.Thread):
         session.get_pty(PTY_TERM,PTY_WIDTH, PTY_HEIGHT, PTY_WIDTH_PIXELS, PTY_HEIGHT_PIXELS)
         session.settimeout(SOCAT_TIMEOUT)
         L = EXECUTE_SUDO_COMMAND(cmd,self.ssh,self.options,self.host)
+        print('local socat {} => {}'.format(cmd, L))
         time.sleep(0.01)
 
 class __localSocat(threading.Thread):
@@ -232,7 +233,8 @@ class __localSocat(threading.Thread):
         proc = subprocess.Popen(cmd.split(' '),stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env, shell=False)
         stdout, stderr = proc.communicate()
         exit_code = proc.wait()
-        time.sleep(0.01)
+        print('local socat exited {} with {} bytes stdout, {} bytes stderr'.format(exit_code,len(stdout),len(stderr)))
+        time.sleep(0.1)
 
 class __ls(threading.Thread):
   def __init__(self, ssh):
@@ -580,6 +582,7 @@ def main():
         sudoLogPathMkdir(ssh, REMOTE_FORWARDED_FILE, options, host)
 
     """   Remote Socat Listener Local File  > Socket """
+    time.sleep(3.0)
     for i, REMOTE_FORWARDED_FILE in enumerate(options.log_files):
         verbose("""   Remote Socat Listener Local File  > Socket #{} {}""".format(i,REMOTE_FORWARDED_FILE))
         agent = __socat(ssh, REMOTE_FORWARDED_FILE, host, options, options.remote_port + i, REMOTE_SOCAT_PATH)
